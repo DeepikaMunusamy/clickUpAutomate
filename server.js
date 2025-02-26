@@ -171,6 +171,6 @@ app.post('/github-webhook', async (req, res) => {
 
 
 // Start server
-app.listen(PORT, () => {
-  console.log(`Server running at http://localhost:${PORT}`);
+app.listen(port, () => {
+  console.log(`Server running at http://localhost:${port}`);
 });
