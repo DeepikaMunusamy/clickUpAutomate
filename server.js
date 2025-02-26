@@ -17,7 +17,9 @@ const app = express();
 // Use body-parser to parse incoming JSON data
 app.use(bodyParser.json());
 
-
+app.get('/', (req, res) => {
+  res.send('Welcome');
+});
 
 // GitHub webhook endpoint
 app.post('/github-webhook', async (req, res) => {
