@@ -1,137 +1,132 @@
 require("dotenv").config();
 const express = require("express");
 const axios = require("axios");
-const bodyParser = require("body-parser");
-
 const app = express();
-const PORT = process.env.PORT || 3000;
-const CLICKUP_API_TOKEN = process.env.CLICKUP_API_TOKEN;
-const LIST_ID = process.env.LIST_ID;
+app.use(express.json());
 
-app.use(bodyParser.json());
+const CLICKUP_API_KEY = process.env.CLICKUP_API_TOKEN; // Replace with your ClickUp API key
 
-// Root endpoint
-app.get("/", (req, res) => {
-  res.send("Welcome to GitHub-ClickUp Integration");
-});
-
-// GitHub Webhook Handler
-app.post("/webhook", async (req, res) => {
+// GitHub Webhook Endpoint
+app.post("/github-webhook", async (req, res) => {
   const event = req.headers["x-github-event"];
   const payload = req.body;
 
-  try {
-    // 1. Automatically Create ClickUp Tasks from GitHub Issues
-    if (event === "issues" && payload.action === "opened") {
-      const { title, body, html_url: issueUrl, user } = payload.issue;
-      const issueAuthor = user.login;
+  console.log(`Received GitHub event: ${event}`);
 
-      await createClickUpTask({
-        name: title,
-        description: `Issue opened by ${issueAuthor}: ${issueUrl}\n\n${body}`,
-        status: "to do",
-        priority: 3, // Optional
-        due_date: Date.now() + 7 * 24 * 60 * 60 * 1000, // 7 days from now
-      });
+  // Handle Pull Request Events
+  if (event === "pull_request") {
+    const action = payload.action;
+    const pr = payload.pull_request;
 
-      console.log("Issue task created in ClickUp!");
+    // Extract ClickUp Task ID from PR description
+    const taskId = extractClickUpTaskId(pr.body);
+    if (!taskId) {
+      console.log("No ClickUp Task ID found in PR description.");
+      return res.status(200).send("No Task ID found.");
     }
 
-    // 2. Sync ClickUp Tasks with GitHub Pull Requests
-    if (event === "pull_request" && payload.action === "opened") {
-      const { title, html_url: prUrl, user } = payload.pull_request;
-      const prAuthor = user.login;
-
-      await createClickUpTask({
-        name: title,
-        description: `PR opened by ${prAuthor}: ${prUrl}`,
-        status: "to do",
-        priority: 2, // Optional
-        due_date: Date.now() + 7 * 24 * 60 * 60 * 1000, // 7 days from now
-      });
-
-      console.log("PR task created in ClickUp!");
-    }
-
-    // 3. Update ClickUp Task Status from GitHub Actions
-    if (event === "pull_request" && payload.action === "closed" && payload.pull_request.merged) {
-      const taskId = await findClickUpTaskId(payload.pull_request.title); // Logic to find related task
-      if (taskId) {
-        await updateClickUpTaskStatus(taskId, "closed");
-        console.log("Task closed successfully in ClickUp!");
+    if (action === "closed" && pr.merged) {
+      // Update ClickUp task status to "Done" when PR is merged
+      try {
+        await updateClickUpTaskStatus(taskId, "Done");
+        console.log(`ClickUp task ${taskId} status updated to Done.`);
+      } catch (error) {
+        console.error("Error updating ClickUp task:", {
+          message: error.message,
+          response: error.response?.data,
+          stack: error.stack,
+        });
+      }
+    } else if (action === "opened") {
+      // Update ClickUp task status to "In Progress" when PR is opened
+      try {
+        await updateClickUpTaskStatus(taskId, "In Progress");
+        console.log(`ClickUp task ${taskId} status updated to In Progress.`);
+      } catch (error) {
+        console.error("Error updating ClickUp task:", {
+          message: error.message,
+          response: error.response?.data,
+          stack: error.stack,
+        });
       }
     }
-
-    // 4. Link GitHub Commits to ClickUp Tasks
-    if (event === "push" && payload.commits) {
-      for (const commit of payload.commits) {
-        const commitMessage = commit.message;
-        const taskIdMatch = commitMessage.match(/CU-(\d+)/); // Look for CU-123 in the commit message
-        if (taskIdMatch) {
-          const taskId = taskIdMatch[0]; // e.g., CU-123
-          await updateClickUpTaskDescription(taskId, `Commit made: ${commitMessage}`);
-          console.log(`Commit linked to ClickUp task ${taskId}`);
-        }
-      }
-    }
-
-    res.status(200).send("Event processed successfully");
-  } catch (error) {
-    console.error("Error processing webhook:", error.response?.data || error.message);
-    res.status(500).send("Error processing webhook");
   }
+
+  // Handle Push Events (commits)
+  if (event === "push") {
+    const commits = payload.commits;
+    for (const commit of commits) {
+      // Extract ClickUp Task ID from commit message
+      const taskId = extractClickUpTaskId(commit.message);
+      if (!taskId) {
+        console.log("No ClickUp Task ID found in commit message.");
+        continue;
+      }
+
+      // Add a comment to the ClickUp task with commit details
+      try {
+        await addCommentToClickUpTask(taskId, `New commit: ${commit.message}`);
+        console.log(`Commit details added to ClickUp task ${taskId}.`);
+      } catch (error) {
+        console.error("Error adding comment to ClickUp task:", {
+          message: error.message,
+          response: error.response?.data,
+          stack: error.stack,
+        });
+      }
+    }
+  }
+
+  res.status(200).send("Webhook received");
 });
 
-// Helper function to create a ClickUp task
-async function createClickUpTask(taskData) {
-  await axios.post(
-    `https://api.clickup.com/api/v2/list/${LIST_ID}/task`,
-    taskData,
-    {
-      headers: {
-        Authorization: CLICKUP_API_TOKEN,
-        "Content-Type": "application/json",
-      },
-    }
-  );
+// Function to extract ClickUp Task ID from a string
+function extractClickUpTaskId(text) {
+  const regex = /https:\/\/app\.clickup\.com\/t\/([a-zA-Z0-9]+)/; // Matches task URLs
+  const match = text.match(regex);
+  return match ? match[1] : null; // Returns the Task ID (e.g., "86cy3tuar")
 }
 
-// Helper function to update ClickUp task status
+// Function to update ClickUp task status
 async function updateClickUpTaskStatus(taskId, status) {
-  await axios.put(
-    `https://api.clickup.com/api/v2/task/${taskId}`,
-    { status },
-    {
-      headers: {
-        Authorization: CLICKUP_API_TOKEN,
-        "Content-Type": "application/json",
-      },
-    }
-  );
+  try {
+    console.log("Using API Key:", CLICKUP_API_KEY); // Debug log
+    console.log("Updating ClickUp task:", taskId); // Debug log
+    const response = await axios.put(
+      `https://api.clickup.com/api/v2/task/${taskId}`,
+      { status },
+      { headers: { Authorization: CLICKUP_API_KEY } }
+    );
+    console.log("Task status updated:", response.data);
+  } catch (error) {
+    console.error("Error updating ClickUp task:", {
+      message: error.message,
+      response: error.response?.data,
+      stack: error.stack,
+    });
+  }
 }
 
-// Helper function to update ClickUp task description
-async function updateClickUpTaskDescription(taskId, description) {
-  await axios.put(
-    `https://api.clickup.com/api/v2/task/${taskId}`,
-    { description },
-    {
-      headers: {
-        Authorization: CLICKUP_API_TOKEN,
-        "Content-Type": "application/json",
-      },
-    }
-  );
+// Function to add a comment to a ClickUp task
+async function addCommentToClickUpTask(taskId, comment) {
+  try {
+    console.log("Using API Key:", CLICKUP_API_KEY); // Debug log
+    console.log("Adding comment to ClickUp task:", taskId); // Debug log
+    const response = await axios.post(
+      `https://api.clickup.com/api/v2/task/${taskId}/comment`,
+      { comment_text: comment },
+      { headers: { Authorization: CLICKUP_API_KEY } }
+    );
+    console.log("Comment added:", response.data);
+  } catch (error) {
+    console.error("Error adding comment to ClickUp task:", {
+      message: error.message,
+      response: error.response?.data,
+      stack: error.stack,
+    });
+  }
 }
 
-// Helper function to find ClickUp task ID (placeholder implementation)
-async function findClickUpTaskId(taskName) {
-  // Implement logic to find the task ID based on the task name
-  // For now, return a placeholder or null
-  return null;
-}
-
-// Start server
-app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
-});
+// Start the server
+const PORT = 3000;
+app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
